@@ -3,11 +3,13 @@ package com.quasera.sqlstudiogrid.ui;
 import com.quasera.sqlstudiogrid.connectivity.ConnectionFactory;
 import com.quasera.sqlstudiogrid.connectivity.QueryExecutor;
 import com.quasera.sqlstudiogrid.core.ConnectionProfile;
+import com.quasera.sqlstudiogrid.metadata.DdlService;
 import com.quasera.sqlstudiogrid.metadata.MetadataService;
 
 import javax.swing.Icon;
 import javax.swing.JButton;
 import javax.swing.JMenuItem;
+import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JPopupMenu;
 import javax.swing.JScrollPane;
@@ -325,9 +327,11 @@ public final class ExplorerPanel extends JPanel {
                         d.profile().type().previewSql(d.schema(), d.name(), PREVIEW_ROWS), false)));
                 menu.add(item("Copiar nombre calificado", () ->
                         copy(d.profile().type().qualified(d.schema(), d.name()))));
+                menu.add(item("Ver DDL", () -> showDdl(d)));
                 menu.addSeparator();
             }
             case PROCEDURE -> {
+                menu.add(item("Ver código (DDL)", () -> showDdl(d)));
                 menu.add(item("Copiar nombre", () -> copy(d.name())));
                 menu.addSeparator();
             }
@@ -344,6 +348,41 @@ public final class ExplorerPanel extends JPanel {
             menu.add(item("Eliminar conexión", () -> actions.deleteConnection(d.profile())));
         }
         menu.show(tree, e.getX(), e.getY());
+    }
+
+    /** Lee el DDL del objeto en segundo plano y lo abre en una consola nueva. */
+    private void showDdl(NodeData d) {
+        DdlService.ObjectKind kind = switch (d.kind()) {
+            case VIEW -> DdlService.ObjectKind.VIEW;
+            case PROCEDURE -> DdlService.ObjectKind.PROCEDURE;
+            default -> DdlService.ObjectKind.TABLE;
+        };
+        setCursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.WAIT_CURSOR));
+        new SwingWorker<String, Void>() {
+            @Override
+            protected String doInBackground() throws Exception {
+                Connection c = metaConnection(d.profile());
+                synchronized (c) {
+                    return new DdlService(c, d.profile().type()).ddl(kind, d.schema(), d.name());
+                }
+            }
+
+            @Override
+            protected void done() {
+                setCursor(java.awt.Cursor.getDefaultCursor());
+                try {
+                    actions.openConsole(d.profile(), get(), false);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } catch (ExecutionException e) {
+                    Throwable cause = e.getCause();
+                    String msg = cause instanceof SQLException sqlEx
+                            ? QueryExecutor.describe(sqlEx) : String.valueOf(cause);
+                    JOptionPane.showMessageDialog(ExplorerPanel.this, "No se pudo obtener el DDL:\n\n" + msg,
+                            "Ver DDL", JOptionPane.ERROR_MESSAGE);
+                }
+            }
+        }.execute();
     }
 
     private static JMenuItem item(String text, Runnable action) {

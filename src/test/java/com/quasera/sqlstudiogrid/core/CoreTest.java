@@ -43,6 +43,19 @@ class CoreTest {
     }
 
     @Test
+    void historialConservaSaltosYTabuladores() throws Exception {
+        HistoryStore store = new HistoryStore(tmp.resolve("h.tsv"));
+        store.add(new HistoryStore.Entry(java.time.Instant.ofEpochMilli(1000), "QA", "SELECT 1", true, 5));
+        store.add(new HistoryStore.Entry(java.time.Instant.ofEpochMilli(2000), "PROD",
+                "SELECT 'a\tb'\nFROM t -- c:\\ruta", false, 7));
+        List<HistoryStore.Entry> entries = store.load();
+        assertEquals(2, entries.size());
+        assertEquals("SELECT 'a\tb'\nFROM t -- c:\\ruta", entries.get(0).sql()); // más reciente primero
+        assertEquals(false, entries.get(0).ok());
+        assertEquals("QA", entries.get(1).connection());
+    }
+
+    @Test
     void guardarYCargarPerfiles() throws Exception {
         CredentialCipher cipher = new CredentialCipher(tmp.resolve("k.key"));
         ProfileStore store = new ProfileStore(tmp.resolve("c.properties"), cipher);

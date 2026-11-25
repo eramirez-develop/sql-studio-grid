@@ -25,6 +25,10 @@ public final class AppPaths {
         return home().resolve("connections.properties");
     }
 
+    public static Path historyFile() {
+        return home().resolve("history.tsv");
+    }
+
     public static Path keyFile() {
         return home().resolve("secret.key");
     }

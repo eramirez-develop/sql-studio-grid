@@ -3,6 +3,7 @@ package com.quasera.sqlstudiogrid;
 import com.quasera.sqlstudiogrid.core.AppPaths;
 import com.quasera.sqlstudiogrid.core.ConnectionProfile;
 import com.quasera.sqlstudiogrid.core.CredentialCipher;
+import com.quasera.sqlstudiogrid.core.HistoryStore;
 import com.quasera.sqlstudiogrid.core.ProfileStore;
 import com.quasera.sqlstudiogrid.ui.MainFrame;
 
@@ -27,7 +28,7 @@ public final class App {
         try {
             ProfileStore store = new ProfileStore(AppPaths.connectionsFile(), new CredentialCipher(AppPaths.keyFile()));
             List<ConnectionProfile> profiles = store.load();
-            new MainFrame(store, profiles).setVisible(true);
+            new MainFrame(store, new HistoryStore(AppPaths.historyFile()), profiles).setVisible(true);
         } catch (IOException | RuntimeException e) {
             JOptionPane.showMessageDialog(null, "No se pudo iniciar: " + e.getMessage(),
                     MainFrame.APP_NAME, JOptionPane.ERROR_MESSAGE);

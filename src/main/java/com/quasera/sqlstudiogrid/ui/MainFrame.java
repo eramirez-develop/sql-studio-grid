@@ -1,7 +1,9 @@
 package com.quasera.sqlstudiogrid.ui;
 
 import com.quasera.sqlstudiogrid.core.ConnectionProfile;
+import com.quasera.sqlstudiogrid.core.HistoryStore;
 import com.quasera.sqlstudiogrid.core.ProfileStore;
+import com.quasera.sqlstudiogrid.metadata.MetadataCache;
 
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
@@ -40,12 +42,14 @@ import java.util.Optional;
 public final class MainFrame extends JFrame implements ExplorerPanel.Actions {
 
     public static final String APP_NAME = "SQL Studio Grid";
-    public static final String VERSION = "0.1.0";
+    public static final String VERSION = "0.2.0";
 
     private static final String CARD_WELCOME = "welcome";
     private static final String CARD_CONSOLES = "consoles";
 
     private final ProfileStore store;
+    private final HistoryStore history;
+    private HistoryDialog historyDialog;
     private final List<ConnectionProfile> profiles = new ArrayList<>();
     private final ExplorerPanel explorer = new ExplorerPanel(this);
     private final JTabbedPane consoles = new JTabbedPane();
@@ -53,9 +57,10 @@ public final class MainFrame extends JFrame implements ExplorerPanel.Actions {
     private final JPanel center = new JPanel(cards);
     private final JLabel statusBar = new JLabel(" ");
 
-    public MainFrame(ProfileStore store, List<ConnectionProfile> initialProfiles) {
+    public MainFrame(ProfileStore store, HistoryStore history, List<ConnectionProfile> initialProfiles) {
         super(APP_NAME);
         this.store = store;
+        this.history = history;
         this.profiles.addAll(initialProfiles);
 
         consoles.setTabLayoutPolicy(JTabbedPane.SCROLL_TAB_LAYOUT);
@@ -114,6 +119,13 @@ public final class MainFrame extends JFrame implements ExplorerPanel.Actions {
         query.add(item("Ejecutar (Ctrl+Enter / F5)", null,
                 () -> activeConsole().ifPresent(QueryConsolePanel::execute)));
         query.add(item("Cancelar (Esc)", null, () -> activeConsole().ifPresent(QueryConsolePanel::cancel)));
+        query.addSeparator();
+        query.add(item("Formatear SQL (Ctrl+Shift+F)", null,
+                () -> activeConsole().ifPresent(QueryConsolePanel::format)));
+        query.add(item("Actualizar datos del autocompletado", null, this::refreshCompletion));
+        query.addSeparator();
+        query.add(item("Historial de consultas...", KeyStroke.getKeyStroke(KeyEvent.VK_H,
+                InputEvent.CTRL_DOWN_MASK | InputEvent.SHIFT_DOWN_MASK), this::showHistory));
         query.addSeparator();
         query.add(item("Exportar resultado a CSV...", KeyStroke.getKeyStroke(KeyEvent.VK_E,
                 InputEvent.CTRL_DOWN_MASK | InputEvent.SHIFT_DOWN_MASK),
@@ -180,6 +192,7 @@ public final class MainFrame extends JFrame implements ExplorerPanel.Actions {
                 }
             }
             persist();
+            MetadataCache.invalidate(profile.id());
             explorer.disconnect(profile);
             explorer.setProfiles(profiles);
             statusBar.setText("Conexión actualizada. Las consolas abiertas siguen usando la configuración anterior.");
@@ -196,6 +209,7 @@ public final class MainFrame extends JFrame implements ExplorerPanel.Actions {
         }
         profiles.removeIf(p -> p.id().equals(profile.id()));
         persist();
+        MetadataCache.invalidate(profile.id());
         explorer.disconnect(profile);
         explorer.setProfiles(profiles);
         updateStatus();
@@ -214,7 +228,7 @@ public final class MainFrame extends JFrame implements ExplorerPanel.Actions {
 
     @Override
     public void openConsole(ConnectionProfile profile, String sql, boolean run) {
-        QueryConsolePanel console = new QueryConsolePanel(profile, sql);
+        QueryConsolePanel console = new QueryConsolePanel(profile, history, sql);
         addConsole(console);
         if (run) {
             SwingUtilities.invokeLater(console::execute);
@@ -293,7 +307,7 @@ public final class MainFrame extends JFrame implements ExplorerPanel.Actions {
         }
         Path path = chooser.getSelectedFile().toPath();
         chooseProfile().ifPresent(profile -> {
-            QueryConsolePanel console = new QueryConsolePanel(profile, "");
+            QueryConsolePanel console = new QueryConsolePanel(profile, history, "");
             try {
                 console.load(path);
                 addConsole(console);
@@ -340,6 +354,30 @@ public final class MainFrame extends JFrame implements ExplorerPanel.Actions {
         return chooser;
     }
 
+    private void showHistory() {
+        if (historyDialog == null || !historyDialog.isDisplayable()) {
+            historyDialog = new HistoryDialog(this, history, sql -> {
+                Optional<QueryConsolePanel> console = activeConsole();
+                if (console.isPresent()) {
+                    console.get().insertText(sql);
+                } else {
+                    chooseProfile().ifPresent(p -> openConsole(p, sql, false));
+                }
+            });
+        }
+        historyDialog.setVisible(true);
+        historyDialog.toFront();
+    }
+
+    private void refreshCompletion() {
+        Optional<ConnectionProfile> profile = activeConsole().map(QueryConsolePanel::profile)
+                .or(explorer::selectedProfile);
+        profile.ifPresent(p -> {
+            MetadataCache.invalidate(p.id());
+            statusBar.setText("Se volverán a leer tablas y columnas de \"" + p.name() + "\" en el próximo autocompletado.");
+        });
+    }
+
     // ---------------------------------------------------------------- general
 
     private void updateCenter() {
@@ -358,6 +396,7 @@ public final class MainFrame extends JFrame implements ExplorerPanel.Actions {
             }
         }
         explorer.closeAll();
+        MetadataCache.closeAll();
         dispose();
         System.exit(0);
     }

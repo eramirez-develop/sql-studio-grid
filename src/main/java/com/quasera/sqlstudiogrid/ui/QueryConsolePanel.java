@@ -3,6 +3,13 @@ package com.quasera.sqlstudiogrid.ui;
 import com.quasera.sqlstudiogrid.connectivity.QueryExecutor;
 import com.quasera.sqlstudiogrid.connectivity.QueryResult;
 import com.quasera.sqlstudiogrid.core.ConnectionProfile;
+import com.quasera.sqlstudiogrid.core.HistoryStore;
+import com.quasera.sqlstudiogrid.metadata.MetadataCache;
+import com.quasera.sqlstudiogrid.sql.SqlCompletion;
+import com.quasera.sqlstudiogrid.sql.SqlCompletion.Candidate;
+import com.quasera.sqlstudiogrid.sql.SqlFormatter;
+import com.quasera.sqlstudiogrid.sql.SqlKeywords;
+import com.quasera.sqlstudiogrid.ui.editor.CompletionPopup;
 import com.quasera.sqlstudiogrid.ui.editor.LineNumberView;
 import com.quasera.sqlstudiogrid.ui.editor.SqlEditor;
 import com.quasera.sqlstudiogrid.ui.grid.ResultPanel;
@@ -32,6 +39,12 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.SQLException;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.Locale;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
 
@@ -43,6 +56,7 @@ public final class QueryConsolePanel extends JPanel {
     }
 
     private final ConnectionProfile profile;
+    private final HistoryStore history;
     private final QueryExecutor executor;
     private final SqlEditor editor = new SqlEditor();
     private final ResultPanel results = new ResultPanel();
@@ -59,9 +73,10 @@ public final class QueryConsolePanel extends JPanel {
     private boolean dirty;
     private TitleListener titleListener = c -> { };
 
-    public QueryConsolePanel(ConnectionProfile profile, String initialSql) {
+    public QueryConsolePanel(ConnectionProfile profile, HistoryStore history, String initialSql) {
         super(new BorderLayout());
         this.profile = profile;
+        this.history = history;
         this.executor = new QueryExecutor(profile);
 
         editor.setSql(initialSql);
@@ -82,6 +97,8 @@ public final class QueryConsolePanel extends JPanel {
             }
         });
 
+        new CompletionPopup(editor, this::complete);
+
         JScrollPane editorScroll = new JScrollPane(editor);
         editorScroll.setRowHeaderView(new LineNumberView(editor));
 
@@ -97,6 +114,8 @@ public final class QueryConsolePanel extends JPanel {
         bindKey(KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, InputEvent.CTRL_DOWN_MASK), "execute", this::execute);
         bindKey(KeyStroke.getKeyStroke(KeyEvent.VK_F5, 0), "execute-f5", this::execute);
         bindKey(KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0), "cancel", this::cancel);
+        bindKey(KeyStroke.getKeyStroke(KeyEvent.VK_F, InputEvent.CTRL_DOWN_MASK | InputEvent.SHIFT_DOWN_MASK),
+                "format", this::format);
 
         updateButtons();
         dirty = false;
@@ -170,6 +189,7 @@ public final class QueryConsolePanel extends JPanel {
 
         running = new SwingWorker<>() {
             private int count;
+            private boolean failed;
 
             @Override
             protected Void doInBackground() throws Exception {
@@ -182,6 +202,7 @@ public final class QueryConsolePanel extends JPanel {
                 for (QueryResult r : chunks) {
                     results.add(r);
                     count++;
+                    failed |= r.kind() == QueryResult.Kind.ERROR;
                 }
                 status.setText("Ejecutando... (" + count + " resultado(s))");
             }
@@ -201,7 +222,9 @@ public final class QueryConsolePanel extends JPanel {
                             ? QueryExecutor.describe(sqlEx) : String.valueOf(cause);
                     results.add(QueryResult.error(sql, msg, 0));
                     outcome = "Error: " + firstLine(msg);
+                    failed = true;
                 }
+                record(sql, !failed, System.currentTimeMillis() - start);
                 running = null;
                 status.setText(outcome + (executor.isConnected() ? "" : " · sin conexión"));
                 updateButtons();
@@ -275,6 +298,88 @@ public final class QueryConsolePanel extends JPanel {
         autoCommit.setEnabled(!busy);
         commitButton.setEnabled(!busy && !autoCommit.isSelected());
         rollbackButton.setEnabled(!busy && !autoCommit.isSelected());
+    }
+
+    private void record(String sql, boolean ok, long elapsedMs) {
+        try {
+            history.add(new HistoryStore.Entry(Instant.now(), profile.name(), sql.strip(), ok, elapsedMs));
+        } catch (IOException e) {
+            results.log("No se pudo guardar en el historial: " + e.getMessage());
+        }
+    }
+
+    // ---------------------------------------------------------------- edición
+
+    /** Formatea la selección, o todo el script si no hay selección (Ctrl+Shift+F). */
+    public void format() {
+        String selected = editor.getSelectedText();
+        if (selected == null || selected.isBlank()) {
+            editor.selectAll();
+            selected = editor.getText();
+        }
+        if (selected.isBlank()) {
+            return;
+        }
+        editor.replaceSelection(SqlFormatter.format(selected));
+        focusEditor();
+    }
+
+    /** Inserta texto en la posición del cursor (por ejemplo desde el historial). */
+    public void insertText(String text) {
+        editor.replaceSelection(text);
+        focusEditor();
+    }
+
+    /** Sugerencias de autocompletado: columnas, tablas, esquemas y palabras clave. */
+    private List<Candidate> complete(String text, int caret) throws SQLException {
+        MetadataCache cache = MetadataCache.of(profile);
+        List<Candidate> out = new ArrayList<>();
+        String qualifier = SqlCompletion.qualifierAt(text, caret);
+        if (qualifier != null) {
+            String target = SqlCompletion.aliases(text).getOrDefault(qualifier.toLowerCase(Locale.ROOT), qualifier);
+            List<String> parts = SqlCompletion.splitQualified(target);
+            if (!parts.isEmpty()) {
+                String table = parts.getLast();
+                String schema = parts.size() >= 2 ? parts.get(parts.size() - 2) : null;
+                for (String column : cache.columns(schema, table)) {
+                    out.add(new Candidate(column, SqlCompletion.Kind.COLUMN, table));
+                }
+            }
+            if (out.isEmpty()) {
+                // el calificador puede ser un esquema: "dbo." -> tablas de dbo
+                for (MetadataCache.TableRef t : cache.tables()) {
+                    if (qualifier.equalsIgnoreCase(t.schema())) {
+                        out.add(new Candidate(t.name(), t.view() ? SqlCompletion.Kind.VIEW : SqlCompletion.Kind.TABLE,
+                                t.schema()));
+                    }
+                }
+            }
+            return out;
+        }
+        Set<String> seen = new java.util.HashSet<>();
+        for (String ref : new LinkedHashSet<>(SqlCompletion.aliases(text).values())) {
+            List<String> parts = SqlCompletion.splitQualified(ref);
+            if (parts.isEmpty()) {
+                continue;
+            }
+            String table = parts.getLast();
+            String schema = parts.size() >= 2 ? parts.get(parts.size() - 2) : null;
+            for (String column : cache.columns(schema, table)) {
+                if (seen.add(column.toLowerCase(Locale.ROOT))) {
+                    out.add(new Candidate(column, SqlCompletion.Kind.COLUMN, table));
+                }
+            }
+        }
+        Set<String> schemas = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+        for (MetadataCache.TableRef t : cache.tables()) {
+            out.add(new Candidate(t.name(), t.view() ? SqlCompletion.Kind.VIEW : SqlCompletion.Kind.TABLE, t.schema()));
+            if (t.schema() != null) {
+                schemas.add(t.schema());
+            }
+        }
+        schemas.forEach(s -> out.add(new Candidate(s, SqlCompletion.Kind.SCHEMA, "")));
+        new TreeSet<>(SqlKeywords.KEYWORDS).forEach(k -> out.add(new Candidate(k, SqlCompletion.Kind.KEYWORD, "")));
+        return out;
     }
 
     // ---------------------------------------------------------------- archivos

@@ -92,7 +92,7 @@ public final class MetadataService {
         return result;
     }
 
-    private static boolean needsSize(String typeName) {
+    static boolean needsSize(String typeName) {
         if (typeName == null) {
             return false;
         }
@@ -113,7 +113,7 @@ public final class MetadataService {
     }
 
     /** Escapa los comodines '_' y '%' que DatabaseMetaData interpreta como patrón. */
-    private static String escape(DatabaseMetaData md, String value) throws SQLException {
+    public static String escape(DatabaseMetaData md, String value) throws SQLException {
         String esc = md.getSearchStringEscape();
         if (esc == null || esc.isEmpty() || value == null) {
             return value;
